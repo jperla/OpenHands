@@ -151,6 +151,31 @@ describe("InviteOrganizationMemberModal", () => {
     expect(onCloseMock).toHaveBeenCalledOnce();
   });
 
+  it("should invite a typed email even when it was never committed with space", async () => {
+    const inviteMembersBatchSpy = vi.spyOn(
+      organizationService,
+      "inviteMembers",
+    );
+    const onCloseMock = vi.fn();
+
+    renderInviteOrganizationMemberModal({ onClose: onCloseMock });
+
+    const modal = screen.getByTestId("invite-modal");
+    const badgeInput = within(modal).getByTestId("emails-badge-input");
+    // No trailing space — clicking the button blurs the input, which commits
+    // the pending text. Previously this errored with "press space".
+    await userEvent.type(badgeInput, "someone@acme.org");
+
+    const submitButton = within(modal).getByRole("button", { name: /add/i });
+    await userEvent.click(submitButton);
+
+    expect(inviteMembersBatchSpy).toHaveBeenCalledExactlyOnceWith({
+      orgId: "1",
+      emails: ["someone@acme.org"],
+      role: "member",
+    });
+  });
+
   it("should display an error toast when clicking add button with no emails added", async () => {
     // Arrange
     const displayErrorToastSpy = vi.spyOn(ToastHandlers, "displayErrorToast");
@@ -167,5 +192,44 @@ describe("InviteOrganizationMemberModal", () => {
       "ORG$NO_EMAILS_ADDED_HINT",
     );
     expect(inviteMembersSpy).not.toHaveBeenCalled();
+  });
+
+  it("should show invite links instead of closing when email delivery is not configured", async () => {
+    vi.spyOn(organizationService, "inviteMembers").mockResolvedValue({
+      successful: [
+        {
+          id: 1,
+          email: "someone@acme.org",
+          role: "member",
+          status: "pending",
+          created_at: "2026-01-01T00:00:00Z",
+          expires_at: "2026-01-08T00:00:00Z",
+          invite_url:
+            "https://app.example.com/api/organizations/members/invite/accept?token=inv-abc",
+        },
+      ],
+      failed: [],
+      email_delivery_configured: false,
+    });
+    const onCloseMock = vi.fn();
+
+    renderInviteOrganizationMemberModal({ onClose: onCloseMock });
+
+    const modal = screen.getByTestId("invite-modal");
+    const badgeInput = within(modal).getByTestId("emails-badge-input");
+    await userEvent.type(badgeInput, "someone@acme.org ");
+    const submitButton = within(modal).getByRole("button", { name: /add/i });
+    await userEvent.click(submitButton);
+
+    // The links are the only way the invitee can join, so the modal stays
+    // open showing them with copy buttons instead of closing.
+    const linksModal = await screen.findByTestId("invite-links-modal");
+    expect(onCloseMock).not.toHaveBeenCalled();
+    expect(
+      within(linksModal).getByTestId("copy-invite-link-button"),
+    ).toBeInTheDocument();
+    expect(
+      within(linksModal).getByText("someone@acme.org"),
+    ).toBeInTheDocument();
   });
 });
