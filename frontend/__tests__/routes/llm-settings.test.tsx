@@ -245,6 +245,7 @@ async function renderLlmSettingsScreen({
   organizations,
   scope = "personal",
   view = "form",
+  featureFlags,
 }: {
   appMode?: "oss" | "saas";
   organizationId?: string;
@@ -258,6 +259,9 @@ async function renderLlmSettingsScreen({
   // ``"create"`` clicks Add Profile instead (blank create form), and
   // ``"profiles"`` tests the list view itself.
   view?: "form" | "create" | "profiles";
+  // Web-client feature flags merged into the mocked /config payload, e.g.
+  // ``{ allow_user_llm_configuration: false }`` for managed OHE installs.
+  featureFlags?: Record<string, unknown>;
 } = {}) {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -267,7 +271,10 @@ async function renderLlmSettingsScreen({
 
   useSelectedOrganizationStore.setState({ organizationId });
   mockUseConfig.mockReturnValue({
-    data: { app_mode: appMode },
+    data: {
+      app_mode: appMode,
+      ...(featureFlags ? { feature_flags: featureFlags } : {}),
+    },
     isLoading: false,
   });
 
@@ -2717,6 +2724,136 @@ describe("LlmSettingsScreen", () => {
       expect(screen.getByTestId("llm-profile-name-input")).toHaveValue(
         "openai_gpt-4o",
       );
+    });
+  });
+
+  describe("managed LLM configuration gating (allow_user_llm_configuration=false)", () => {
+    const MANAGED_FLAGS = { allow_user_llm_configuration: false };
+
+    it("hides BYOK inputs and lands on the model dropdown even when a custom base URL is saved", async () => {
+      // A saved custom base URL normally opens the advanced form with the
+      // custom-model + base-URL inputs. With BYOK disallowed the user lands
+      // on the managed dropdown instead — the saved settings themselves are
+      // untouched and keep working at runtime.
+      vi.spyOn(SettingsService, "getSettings").mockResolvedValue(
+        buildSettings({
+          llm_model: "openai/gpt-4o",
+          llm_base_url: "https://custom.example/v1",
+          agent_settings: {
+            llm: {
+              model: "openai/gpt-4o",
+              base_url: "https://custom.example/v1",
+            },
+          },
+        }),
+      );
+
+      await renderLlmSettingsScreen({
+        appMode: "oss",
+        featureFlags: MANAGED_FLAGS,
+      });
+
+      await screen.findByTestId("llm-settings-form-basic");
+      expect(screen.getByTestId("llm-provider-input")).toBeInTheDocument();
+      expect(screen.getByTestId("llm-model-input")).toBeInTheDocument();
+      expect(screen.getByTestId("save-button")).toBeInTheDocument();
+
+      expect(
+        screen.queryByTestId("llm-settings-form-advanced"),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByTestId("llm-custom-model-input"),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByTestId("base-url-input")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("llm-api-key-input")).not.toBeInTheDocument();
+      // No BYOK and no schema-driven advanced fields → no Advanced toggle.
+      expect(
+        screen.queryByTestId("sdk-section-advanced-toggle"),
+      ).not.toBeInTheDocument();
+    });
+
+    it("keeps the basic header (no BYOK inputs) when a schema-driven Advanced toggle is used", async () => {
+      // The Advanced toggle can still surface via real advanced schema
+      // fields; switching to it must not reveal the custom-model/base-URL
+      // inputs.
+      vi.spyOn(SettingsService, "getSettings").mockResolvedValue(
+        buildSettingsWithAdvancedToggle({
+          llm_model: "openai/gpt-4o",
+          agent_settings: { llm: { model: "openai/gpt-4o" } },
+        }),
+      );
+
+      await renderLlmSettingsScreen({
+        appMode: "oss",
+        featureFlags: MANAGED_FLAGS,
+      });
+
+      await screen.findByTestId("llm-settings-form-basic");
+      await userEvent.click(screen.getByTestId("sdk-section-advanced-toggle"));
+
+      expect(screen.getByTestId("llm-settings-form-basic")).toBeInTheDocument();
+      expect(
+        screen.queryByTestId("llm-settings-form-advanced"),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByTestId("llm-custom-model-input"),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByTestId("base-url-input")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("llm-api-key-input")).not.toBeInTheDocument();
+    });
+
+    it("hides BYOK inputs on the org-defaults form in SaaS mode", async () => {
+      vi.spyOn(
+        organizationService,
+        "getOrganizationSettings",
+      ).mockResolvedValue(
+        buildSettings({
+          agent_settings: { llm: { model: "openai/gpt-4o" } },
+        }),
+      );
+
+      await renderLlmSettingsScreen({
+        appMode: "saas",
+        scope: "org",
+        featureFlags: MANAGED_FLAGS,
+      });
+
+      await screen.findByTestId("llm-settings-form-basic");
+      expect(screen.getByTestId("llm-provider-input")).toBeInTheDocument();
+      expect(screen.getByTestId("llm-model-input")).toBeInTheDocument();
+      expect(
+        screen.queryByTestId("sdk-section-advanced-toggle"),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByTestId("llm-custom-model-input"),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByTestId("base-url-input")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("llm-api-key-input")).not.toBeInTheDocument();
+    });
+
+    it("keeps BYOK inputs when the flag is explicitly true", async () => {
+      vi.spyOn(SettingsService, "getSettings").mockResolvedValue(
+        buildSettings(),
+      );
+
+      await renderLlmSettingsScreen({
+        appMode: "oss",
+        featureFlags: { allow_user_llm_configuration: true },
+      });
+
+      await screen.findByTestId("llm-settings-form-basic");
+      expect(screen.getByTestId("llm-api-key-input")).toBeInTheDocument();
+      expect(
+        screen.getByTestId("sdk-section-advanced-toggle"),
+      ).toBeInTheDocument();
+
+      await userEvent.click(screen.getByTestId("sdk-section-advanced-toggle"));
+
+      expect(
+        screen.getByTestId("llm-settings-form-advanced"),
+      ).toBeInTheDocument();
+      expect(screen.getByTestId("llm-custom-model-input")).toBeInTheDocument();
+      expect(screen.getByTestId("base-url-input")).toBeInTheDocument();
     });
   });
 });
